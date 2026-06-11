@@ -19,7 +19,13 @@ from telethon.tl.functions.messages import GetBotCallbackAnswerRequest, RequestW
 
 # Apply patch before importing TelegramClient
 from .patch import telegrambaseclient  # noqa: F401 - patches TelegramClient on import
-from telethon import TelegramClient
+from telethon import TelegramClient, events
+
+# Default response timeout (seconds) — how long we wait for a bot/user reply after sending
+DEFAULT_RESPONSE_TIMEOUT = 8.0
+
+# Directory for downloaded media (auto-created on first use)
+MEDIA_DIR = "/tmp/tg_mcp_media"
 
 
 class TelegramTestClient:
@@ -64,6 +70,7 @@ class TelegramTestClient:
         self.client: Optional[TelegramClient] = None
         self.bot_entity = None
         self.bot_username: Optional[str] = None
+        self._entity_cache: Dict[str, Any] = {}
 
     def _create_client(self) -> TelegramClient:
         """Create TelegramClient with proper parameters."""
@@ -118,22 +125,88 @@ class TelegramTestClient:
         try:
             self.bot_username = bot_username.lstrip("@")
             self.bot_entity = await self.client.get_entity(self.bot_username)
+            self._entity_cache[self.bot_username.lower()] = self.bot_entity
             return True
         except Exception as e:
             raise Exception(f"Failed to find @{bot_username}: {e}")
 
     async def _resolve_peer(self, peer: Optional[str] = None):
-        """Resolve peer entity. Uses provided peer or falls back to default bot_entity."""
+        """Resolve peer entity. Uses provided peer or falls back to default bot_entity. Cached."""
         if peer is None:
             if not self.bot_entity:
                 raise Exception("No default peer set. Use telegram_set_bot or provide 'peer' parameter.")
             return self.bot_entity
         if not self.client:
             raise Exception("Not connected")
+        key = peer.lstrip("@").lower()
+        if key in self._entity_cache:
+            return self._entity_cache[key]
         try:
-            return await self.client.get_entity(peer.lstrip("@"))
+            entity = await self.client.get_entity(peer.lstrip("@"))
         except Exception as e:
             raise Exception(f"Failed to find peer @{peer}: {e}")
+        self._entity_cache[key] = entity
+        return entity
+
+    async def _await_response(
+        self,
+        entity,
+        last_id: int,
+        timeout: float = DEFAULT_RESPONSE_TIMEOUT,
+    ) -> List[Message]:
+        """Wait for new incoming messages from `entity` with id > last_id, via NewMessage event.
+
+        Returns the collected messages once the bot stops sending (200ms quiet window)
+        or when timeout is hit. Returns empty list on timeout with no messages.
+        """
+        received: List[Message] = []
+        new_msg_event = asyncio.Event()
+
+        try:
+            peer_id = entity.id
+        except AttributeError:
+            peer_id = None
+
+        async def handler(event):
+            msg = event.message
+            if msg.out:
+                return
+            if peer_id is not None:
+                chat_id = getattr(event, "chat_id", None)
+                if chat_id is not None and chat_id != peer_id:
+                    return
+            if msg.id <= last_id:
+                return
+            received.append(msg)
+            new_msg_event.set()
+
+        self.client.add_event_handler(handler, events.NewMessage(incoming=True))
+
+        try:
+            # Quick check: maybe response already arrived between send and handler registration
+            recent = await self.client.get_messages(entity, limit=3)
+            for m in recent:
+                if not m.out and m.id > last_id and not any(r.id == m.id for r in received):
+                    received.append(m)
+            if received:
+                new_msg_event.set()
+
+            try:
+                await asyncio.wait_for(new_msg_event.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                return received
+
+            # Got first message — give bot up to 600ms more for follow-up messages
+            quiet_window = 0.6
+            while True:
+                new_msg_event.clear()
+                try:
+                    await asyncio.wait_for(new_msg_event.wait(), timeout=quiet_window)
+                except asyncio.TimeoutError:
+                    break
+            return received
+        finally:
+            self.client.remove_event_handler(handler)
 
     async def send_message(self, text: str, peer: Optional[str] = None) -> Dict[str, Any]:
         """Send a text message and wait for response."""
@@ -142,30 +215,8 @@ class TelegramTestClient:
 
         entity = await self._resolve_peer(peer)
 
-        # Send message
-        await self.client.send_message(entity, text)
-
-        # Wait for response
-        await asyncio.sleep(1)
-
-        # Get latest messages
-        messages = await self.client.get_messages(entity, limit=5)
-
-        # Find response (first message not from us after ours)
-        responses = []
-        for msg in messages:
-            if msg.out:
-                break
-            responses.append(msg)
-
-        if not responses:
-            await asyncio.sleep(2)
-            messages = await self.client.get_messages(entity, limit=5)
-            for msg in messages:
-                if msg.out:
-                    break
-                responses.append(msg)
-
+        sent = await self.client.send_message(entity, text)
+        responses = await self._await_response(entity, last_id=sent.id)
         return self._format_messages(responses)
 
     async def click_button(self, button_text: str, peer: Optional[str] = None) -> Dict[str, Any]:
@@ -188,6 +239,8 @@ class TelegramTestClient:
                     for button in row.buttons:
                         if hasattr(button, "text") and button.text == button_text:
                             if hasattr(button, "data"):
+                                latest = await self.client.get_messages(entity, limit=1)
+                                last_id = latest[0].id if latest else 0
                                 await self.client(
                                     GetBotCallbackAnswerRequest(
                                         peer=entity,
@@ -195,8 +248,8 @@ class TelegramTestClient:
                                         data=button.data,
                                     )
                                 )
-                                await asyncio.sleep(1)
-                                return await self._get_latest_response(entity)
+                                responses = await self._await_response(entity, last_id=last_id)
+                                return self._format_messages(responses)
 
             # Check for reply keyboard
             if msg.reply_markup and isinstance(msg.reply_markup, ReplyKeyboardMarkup):
@@ -218,10 +271,9 @@ class TelegramTestClient:
         if not os.path.exists(file_path):
             raise Exception(f"Voice file not found: {file_path}")
 
-        await self.client.send_file(entity, file_path, voice_note=True)
-
-        await asyncio.sleep(2)
-        return await self._get_latest_response(entity)
+        sent = await self.client.send_file(entity, file_path, voice_note=True)
+        responses = await self._await_response(entity, last_id=sent.id)
+        return self._format_messages(responses)
 
     async def send_photo(self, file_path: str, caption: str = "", peer: Optional[str] = None) -> Dict[str, Any]:
         """Send a photo."""
@@ -233,10 +285,9 @@ class TelegramTestClient:
         if not os.path.exists(file_path):
             raise Exception(f"Photo file not found: {file_path}")
 
-        await self.client.send_file(entity, file_path, caption=caption)
-
-        await asyncio.sleep(2)
-        return await self._get_latest_response(entity)
+        sent = await self.client.send_file(entity, file_path, caption=caption)
+        responses = await self._await_response(entity, last_id=sent.id)
+        return self._format_messages(responses)
 
     async def send_file(self, file_path: str, caption: str = "", peer: Optional[str] = None) -> Dict[str, Any]:
         """Send a file/document."""
@@ -248,10 +299,9 @@ class TelegramTestClient:
         if not os.path.exists(file_path):
             raise Exception(f"File not found: {file_path}")
 
-        await self.client.send_file(entity, file_path, caption=caption, force_document=True)
-
-        await asyncio.sleep(2)
-        return await self._get_latest_response(entity)
+        sent = await self.client.send_file(entity, file_path, caption=caption, force_document=True)
+        responses = await self._await_response(entity, last_id=sent.id)
+        return self._format_messages(responses)
 
     async def send_video(self, file_path: str, caption: str = "", peer: Optional[str] = None) -> Dict[str, Any]:
         """Send a video."""
@@ -263,10 +313,9 @@ class TelegramTestClient:
         if not os.path.exists(file_path):
             raise Exception(f"Video file not found: {file_path}")
 
-        await self.client.send_file(entity, file_path, caption=caption, supports_streaming=True)
-
-        await asyncio.sleep(2)
-        return await self._get_latest_response(entity)
+        sent = await self.client.send_file(entity, file_path, caption=caption, supports_streaming=True)
+        responses = await self._await_response(entity, last_id=sent.id)
+        return self._format_messages(responses)
 
     async def send_video_note(self, file_path: str, peer: Optional[str] = None) -> Dict[str, Any]:
         """Send a video note (circle)."""
@@ -278,19 +327,38 @@ class TelegramTestClient:
         if not os.path.exists(file_path):
             raise Exception(f"Video file not found: {file_path}")
 
-        await self.client.send_file(entity, file_path, video_note=True)
+        sent = await self.client.send_file(entity, file_path, video_note=True)
+        responses = await self._await_response(entity, last_id=sent.id)
+        return self._format_messages(responses)
 
-        await asyncio.sleep(2)
-        return await self._get_latest_response(entity)
-
-    async def get_messages(self, limit: int = 10, peer: Optional[str] = None) -> Dict[str, Any]:
+    async def get_messages(
+        self,
+        limit: int = 10,
+        peer: Optional[str] = None,
+        download_media: bool = True,
+    ) -> Dict[str, Any]:
         """Get the latest messages from the conversation."""
         if not self.client:
             raise Exception("Not connected")
 
         entity = await self._resolve_peer(peer)
         messages = await self.client.get_messages(entity, limit=limit)
-        return self._format_messages(messages)
+        media_paths = await self._bulk_download(messages) if download_media else None
+        return self._format_messages(messages, media_paths=media_paths)
+
+    async def _bulk_download(self, messages: List[Message]) -> Dict[int, str]:
+        """Download media for all messages in parallel. Returns {msg_id: path}."""
+        targets = [m for m in messages if self._media_type(m)]
+        if not targets:
+            return {}
+        paths = await asyncio.gather(
+            *(self._download_message_media(m) for m in targets),
+            return_exceptions=True,
+        )
+        return {
+            m.id: p for m, p in zip(targets, paths)
+            if isinstance(p, str) and p
+        }
 
     async def get_keyboard(self, peer: Optional[str] = None) -> Dict[str, Any]:
         """Get the current keyboard buttons."""
@@ -338,19 +406,13 @@ class TelegramTestClient:
 
         entity = await self._resolve_peer(peer)
 
-        # Get current latest message id
         messages = await self.client.get_messages(entity, limit=1)
         last_id = messages[0].id if messages else 0
 
-        # Poll for new messages
-        for _ in range(timeout):
-            await asyncio.sleep(1)
-            messages = await self.client.get_messages(entity, limit=5)
-            new_messages = [m for m in messages if m.id > last_id and not m.out]
-            if new_messages:
-                return self._format_messages(new_messages)
-
-        return {"messages": [], "note": "Timeout waiting for response"}
+        responses = await self._await_response(entity, last_id=last_id, timeout=float(timeout))
+        if not responses:
+            return {"messages": [], "note": "Timeout waiting for response"}
+        return self._format_messages(responses)
 
     async def open_webapp(self, button_text: Optional[str] = None, peer: Optional[str] = None) -> Dict[str, Any]:
         """Open a WebApp and get its URL.
@@ -420,6 +482,7 @@ class TelegramTestClient:
         channel: str,
         limit: int = 100,
         offset_id: int = 0,
+        download_media: bool = True,
     ) -> Dict[str, Any]:
         """Read messages from a channel/group with pagination.
 
@@ -427,6 +490,8 @@ class TelegramTestClient:
             channel: Channel/group username or invite link.
             limit: Number of messages to fetch (max 100 per call).
             offset_id: Fetch messages older than this message ID (0 = from newest).
+            download_media: If True, download all media (photos/videos/docs/voice) to MEDIA_DIR
+                and include local file paths in the response.
         """
         if not self.client:
             raise Exception("Not connected")
@@ -438,6 +503,8 @@ class TelegramTestClient:
             limit=min(limit, 100),
             offset_id=offset_id,
         )
+
+        media_paths = await self._bulk_download(messages) if download_media else {}
 
         formatted = []
         for msg in messages:
@@ -451,6 +518,11 @@ class TelegramTestClient:
                 "has_video": bool(msg.video),
                 "has_document": bool(msg.document),
             }
+            media_type = self._media_type(msg)
+            if media_type:
+                msg_data["media_type"] = media_type
+            if msg.id in media_paths:
+                msg_data["media_path"] = media_paths[msg.id]
             if msg.sender:
                 msg_data["sender"] = getattr(msg.sender, "title", None) or getattr(msg.sender, "first_name", None)
             formatted.append(msg_data)
@@ -519,8 +591,63 @@ class TelegramTestClient:
                 if target_msg.media and hasattr(target_msg.media, "document") else None,
         }
 
-    def _format_messages(self, messages: List[Message]) -> Dict[str, Any]:
-        """Format messages for output."""
+    def _media_type(self, msg: Message) -> Optional[str]:
+        """Identify the dominant media type of a message."""
+        if msg.photo:
+            return "photo"
+        if msg.video:
+            return "video"
+        if msg.video_note:
+            return "video_note"
+        if msg.voice:
+            return "voice"
+        if msg.audio:
+            return "audio"
+        if msg.sticker:
+            return "sticker"
+        if msg.gif:
+            return "gif"
+        if msg.document:
+            return "document"
+        return None
+
+    async def _download_message_media(self, msg: Message) -> Optional[str]:
+        """Download media from a message into MEDIA_DIR. Returns absolute path or None.
+
+        Files are named msg_<id>.<ext> so ordering matches message ordering.
+        """
+        if not (msg.photo or msg.video or msg.video_note or msg.voice
+                or msg.audio or msg.document):
+            return None
+        os.makedirs(MEDIA_DIR, exist_ok=True)
+        path = await msg.download_media(file=os.path.join(MEDIA_DIR, f"msg_{msg.id}"))
+        return path
+
+    async def download_message(
+        self,
+        message_id: int,
+        peer: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Download media of a specific message by id."""
+        if not self.client:
+            raise Exception("Not connected")
+        entity = await self._resolve_peer(peer)
+        msgs = await self.client.get_messages(entity, ids=[message_id])
+        if not msgs or not msgs[0]:
+            raise Exception(f"Message {message_id} not found")
+        msg = msgs[0]
+        media_type = self._media_type(msg)
+        if media_type is None:
+            return {"message_id": msg.id, "media_type": None, "media_path": None, "note": "Message has no media"}
+        path = await self._download_message_media(msg)
+        return {"message_id": msg.id, "media_type": media_type, "media_path": path}
+
+    def _format_messages(
+        self,
+        messages: List[Message],
+        media_paths: Optional[Dict[int, str]] = None,
+    ) -> Dict[str, Any]:
+        """Format messages for output. media_paths: optional {msg_id: file_path}."""
         formatted = []
         for msg in reversed(messages):  # Chronological order
             msg_data = {
@@ -532,6 +659,12 @@ class TelegramTestClient:
                 "has_voice": bool(msg.voice),
                 "has_document": bool(msg.document),
             }
+
+            media_type = self._media_type(msg)
+            if media_type:
+                msg_data["media_type"] = media_type
+            if media_paths and msg.id in media_paths:
+                msg_data["media_path"] = media_paths[msg.id]
 
             # Add keyboard info if present
             if msg.reply_markup:

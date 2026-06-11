@@ -138,7 +138,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="telegram_get_messages",
-            description="Get recent messages from the conversation with a peer (bot, user, or group)",
+            description="Get recent messages from the conversation with a peer (bot, user, or group). Media is auto-downloaded by default; pass download_media=false to skip.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -146,6 +146,11 @@ async def list_tools() -> list[Tool]:
                         "type": ["integer", "string"],
                         "description": "Number of messages to retrieve (default: 10)",
                         "default": 10,
+                    },
+                    "download_media": {
+                        "type": "boolean",
+                        "description": "Download all media in returned messages to /tmp/tg_mcp_media and include 'media_path' per message (default: true)",
+                        "default": True,
                     },
                     "peer": _PEER_PROPERTY,
                 },
@@ -394,7 +399,8 @@ async def list_tools() -> list[Tool]:
             name="telegram_read_channel",
             description=(
                 "Read posts/messages from a Telegram channel, group, or user chat. "
-                "Supports pagination via offset_id — call repeatedly with oldest_id from previous result to read the full history."
+                "Supports pagination via offset_id — call repeatedly with oldest_id from previous result to read the full history. "
+                "Media is auto-downloaded by default; pass download_media=false to skip."
             ),
             inputSchema={
                 "type": "object",
@@ -413,8 +419,28 @@ async def list_tools() -> list[Tool]:
                         "description": "Fetch messages older than this ID. Use oldest_id from previous response for pagination. 0 = start from newest.",
                         "default": 0,
                     },
+                    "download_media": {
+                        "type": "boolean",
+                        "description": "Download all media (photos/videos/docs/voice) to /tmp/tg_mcp_media and include 'media_path' per message (default: true)",
+                        "default": True,
+                    },
                 },
                 "required": ["channel"],
+            },
+        ),
+        Tool(
+            name="telegram_download_media",
+            description="Download media of a specific message by its id. Returns the local file path so it can be read/viewed.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "message_id": {
+                        "type": ["integer", "string"],
+                        "description": "ID of the message whose media should be downloaded",
+                    },
+                    "peer": _PEER_PROPERTY,
+                },
+                "required": ["message_id"],
             },
         ),
     ]
@@ -452,7 +478,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         elif name == "telegram_get_messages":
             limit = int(arguments.get("limit", 10))
-            result = await client.get_messages(limit, peer=peer)
+            download_media = bool(arguments.get("download_media", True))
+            result = await client.get_messages(limit, peer=peer, download_media=download_media)
 
         elif name == "telegram_send_voice":
             file_path = arguments["file_path"]
@@ -498,7 +525,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             channel = arguments["channel"]
             limit = int(arguments.get("limit", 100))
             offset_id = int(arguments.get("offset_id", 0))
-            result = await client.read_channel(channel, limit=limit, offset_id=offset_id)
+            download_media = bool(arguments.get("download_media", True))
+            result = await client.read_channel(
+                channel, limit=limit, offset_id=offset_id, download_media=download_media,
+            )
+
+        elif name == "telegram_download_media":
+            message_id = int(arguments["message_id"])
+            result = await client.download_message(message_id, peer=peer)
 
         elif name == "telegram_ai_send_message":
             ai = get_ai()

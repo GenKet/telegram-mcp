@@ -7,8 +7,10 @@ An MCP (Model Context Protocol) server that lets Claude Code interact with Teleg
 - Send text/media (voice, photo, video, file, video note/circle) to any peer (bot, user, group) via an optional `peer` parameter — no need to switch a default peer
 - Click inline / reply keyboard buttons
 - Read conversation history, keyboards, and channel/group/user chat history with pagination
+- **Auto-download media** in incoming messages (photos, videos, voice, video notes, documents) to `/tmp/tg_mcp_media/msg_<id>.<ext>` so the model can directly read/view them
 - Open Telegram Mini Apps (WebApp) and retrieve URL + init data
 - **AI tools (OpenAI)**: GPT text generation, TTS voice synthesis, Whisper transcription, GPT analysis of voice content
+- Event-driven response waiting — no fixed sleeps, replies are returned the moment the peer answers
 - StringSession support (recommended) for portable, env-friendly auth
 
 ## Installation
@@ -122,11 +124,13 @@ Return the keyboard currently shown in the chat.
 ```
 
 #### `telegram_get_messages`
-Fetch the latest messages from a conversation.
+Fetch the latest messages from a conversation. Media is auto-downloaded by default.
 ```
 limit: 5
-peer: "some_user"   // optional
+peer: "some_user"           // optional
+download_media: true        // default true — set false to skip media downloads
 ```
+Response includes `media_path` for every message that has a photo/video/voice/document/video_note/audio. Files are saved as `/tmp/tg_mcp_media/msg_<id>.<ext>`.
 
 #### `telegram_send_voice` / `telegram_send_photo` / `telegram_send_video` / `telegram_send_video_note` / `telegram_send_file`
 Send media files.
@@ -148,12 +152,21 @@ button_text: "Open app"   // optional — first WebApp button if omitted
 ```
 
 #### `telegram_read_channel`
-Read history from a channel, group, or user chat with pagination.
+Read history from a channel, group, or user chat with pagination. Media is auto-downloaded by default.
 ```
 channel: "durov"
 limit: 100
-offset_id: 0        // use oldest_id from previous response for pagination
+offset_id: 0            // use oldest_id from previous response for pagination
+download_media: true    // default true — set false to skip media downloads
 ```
+
+#### `telegram_download_media`
+Download media of a specific message by id.
+```
+message_id: 12345
+peer: "some_user"    // optional
+```
+Returns `media_path` pointing to `/tmp/tg_mcp_media/msg_<id>.<ext>`.
 
 #### `telegram_get_session_string`
 Return the current session string (useful to save after initial auth).
