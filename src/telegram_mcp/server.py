@@ -429,6 +429,56 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="telegram_find_chat",
+            description=(
+                "Find chats/groups/channels/users by a name or username substring — returns their numeric id, "
+                "type and username, so private groups can then be read by id. Empty query lists recent dialogs."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Part of the chat name or username (case-insensitive). Empty = list most recent dialogs.",
+                    },
+                    "limit": {
+                        "type": ["integer", "string"],
+                        "description": "Max results (default: 20)",
+                        "default": 20,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="telegram_search_messages",
+            description=(
+                "Server-side text search over messages in one chat, or across all chats when 'peer' is omitted. "
+                "Far cheaper than paginating full history. Supports pagination via offset_id."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Text to search for"},
+                    "peer": _PEER_PROPERTY,
+                    "limit": {
+                        "type": ["integer", "string"],
+                        "description": "Max messages to return, max 100 (default: 50)",
+                        "default": 50,
+                    },
+                    "offset_id": {
+                        "type": ["integer", "string"],
+                        "description": "Return messages older than this id. Use oldest_id from the previous response.",
+                        "default": 0,
+                    },
+                    "from_user": {
+                        "type": "string",
+                        "description": "Only messages from this sender (username or numeric id). Single-chat search only.",
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
             name="telegram_download_media",
             description="Download media of a specific message by its id. Returns the local file path so it can be read/viewed.",
             inputSchema={
@@ -528,6 +578,21 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             download_media = bool(arguments.get("download_media", True))
             result = await client.read_channel(
                 channel, limit=limit, offset_id=offset_id, download_media=download_media,
+            )
+
+        elif name == "telegram_find_chat":
+            result = await client.find_chat(
+                arguments.get("query", ""),
+                limit=int(arguments.get("limit", 20)),
+            )
+
+        elif name == "telegram_search_messages":
+            result = await client.search_messages(
+                arguments["query"],
+                peer=peer,
+                limit=int(arguments.get("limit", 50)),
+                offset_id=int(arguments.get("offset_id", 0)),
+                from_user=arguments.get("from_user"),
             )
 
         elif name == "telegram_download_media":

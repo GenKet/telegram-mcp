@@ -567,6 +567,122 @@ class TelegramTestClient:
             "has_more": len(messages) == min(limit, 100),
         }
 
+    def _describe_entity(self, entity) -> Dict[str, Any]:
+        """Short peer description: id, type, title/name, username."""
+        kind = type(entity).__name__
+        if kind == "Channel":
+            kind = "supergroup" if getattr(entity, "megagroup", False) else "channel"
+        elif kind == "Chat":
+            kind = "group"
+        elif kind == "User":
+            kind = "bot" if getattr(entity, "bot", False) else "user"
+        name = getattr(entity, "title", None) or " ".join(
+            p for p in (getattr(entity, "first_name", None), getattr(entity, "last_name", None)) if p
+        )
+        return {
+            "id": entity.id,
+            "type": kind,
+            "name": name or None,
+            "username": getattr(entity, "username", None),
+        }
+
+    async def find_chat(self, query: str = "", limit: int = 20) -> Dict[str, Any]:
+        """Find chats by a name/username substring, or list recent dialogs when query is empty.
+
+        Scans the dialog list (case-insensitive substring match) and, for a non-empty query,
+        also asks the server for public matches — so peers you are not a member of show up too.
+        """
+        if not self.client:
+            raise Exception("Not connected")
+
+        needle = query.strip().lstrip("@").lower()
+        results, seen = [], set()
+
+        async for dialog in self.client.iter_dialogs():
+            if needle:
+                haystack = f"{dialog.name or ''} {getattr(dialog.entity, 'username', '') or ''}".lower()
+                if needle not in haystack:
+                    continue
+            info = self._describe_entity(dialog.entity)
+            info["in_dialogs"] = True
+            info["last_message_date"] = dialog.date.isoformat() if dialog.date else None
+            results.append(info)
+            seen.add(dialog.entity.id)
+            if not needle and len(results) >= limit:
+                break
+
+        if needle:
+            from telethon.tl.functions.contacts import SearchRequest
+
+            try:
+                found = await self.client(SearchRequest(q=query.strip().lstrip("@"), limit=limit))
+                for entity in list(found.users) + list(found.chats):
+                    if entity.id in seen:
+                        continue
+                    info = self._describe_entity(entity)
+                    info["in_dialogs"] = False
+                    results.append(info)
+                    seen.add(entity.id)
+            except Exception as e:
+                results.append({"warning": f"global search failed: {e}"})
+
+        return {"query": query, "results": results[:limit], "count": min(len(results), limit)}
+
+    async def search_messages(
+        self,
+        query: str,
+        peer: Optional[str] = None,
+        limit: int = 50,
+        offset_id: int = 0,
+        from_user: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Server-side message search inside one peer, or across all chats when peer is None.
+
+        Args:
+            query: Text to search for.
+            peer: Where to search — username, link or numeric id. None = global search.
+            limit: Max messages to return (max 100).
+            offset_id: Return messages older than this id (pagination).
+            from_user: Only messages from this sender (per-peer search only).
+        """
+        if not self.client:
+            raise Exception("Not connected")
+
+        entity = await self._resolve_identifier(peer) if peer else None
+        sender = await self._resolve_identifier(from_user) if from_user else None
+
+        kwargs = {"search": query, "limit": min(limit, 100)}
+        if offset_id:
+            kwargs["offset_id"] = offset_id
+        if sender is not None:
+            kwargs["from_user"] = sender
+
+        messages = []
+        async for msg in self.client.iter_messages(entity, **kwargs):
+            item = {
+                "id": msg.id,
+                "date": msg.date.isoformat() if msg.date else None,
+                "text": msg.text or "",
+            }
+            if msg.sender:
+                item["sender"] = getattr(msg.sender, "title", None) or getattr(msg.sender, "first_name", None)
+            if entity is None and msg.chat:
+                item["chat"] = getattr(msg.chat, "title", None) or getattr(msg.chat, "first_name", None)
+                item["chat_id"] = msg.chat.id
+            media_type = self._media_type(msg)
+            if media_type:
+                item["media_type"] = media_type
+            messages.append(item)
+
+        return {
+            "query": query,
+            "peer": peer or "global",
+            "messages": messages,
+            "count": len(messages),
+            "oldest_id": messages[-1]["id"] if messages else None,
+            "has_more": len(messages) == min(limit, 100),
+        }
+
     async def _get_latest_response(self, entity=None) -> Dict[str, Any]:
         """Get the latest response from peer."""
         entity = entity or self.bot_entity
