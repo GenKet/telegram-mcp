@@ -14,6 +14,9 @@ from telethon.tl.types import (
     KeyboardButtonSimpleWebView,
     Message,
     InputPeerUser,
+    PeerChannel,
+    PeerChat,
+    PeerUser,
 )
 from telethon.tl.functions.messages import GetBotCallbackAnswerRequest, RequestWebViewRequest
 
@@ -142,11 +145,38 @@ class TelegramTestClient:
         if key in self._entity_cache:
             return self._entity_cache[key]
         try:
-            entity = await self.client.get_entity(peer.lstrip("@"))
+            entity = await self._resolve_identifier(peer)
         except Exception as e:
-            raise Exception(f"Failed to find peer @{peer}: {e}")
+            raise Exception(f"Failed to find peer {peer}: {e}")
         self._entity_cache[key] = entity
         return entity
+
+    async def _resolve_identifier(self, ident: str):
+        """Resolve a peer by username, t.me link or numeric id.
+
+        A bare numeric id (with optional -100 prefix) is tried as channel/supergroup,
+        then legacy group, then user — get_entity() alone reads a plain int as a user id,
+        so private groups referenced by id would never be found.
+        """
+        cleaned = ident.strip().lstrip("@")
+        digits = cleaned[4:] if cleaned.startswith("-100") else cleaned.lstrip("-")
+        if not digits.isdigit():
+            return await self.client.get_entity(cleaned)
+
+        peer_id = int(digits)
+        errors = []
+        for peer_type in (PeerChannel, PeerChat, PeerUser):
+            try:
+                return await self.client.get_entity(peer_type(peer_id))
+            except Exception as e:
+                errors.append(f"{peer_type.__name__}: {e}")
+
+        # Last resort: scan dialogs — works for peers whose access_hash we cannot guess
+        async for dialog in self.client.iter_dialogs():
+            if dialog.entity.id == peer_id:
+                return dialog.entity
+
+        raise Exception(f"id {peer_id} not resolvable ({'; '.join(errors)})")
 
     async def _await_response(
         self,
@@ -487,7 +517,7 @@ class TelegramTestClient:
         """Read messages from a channel/group with pagination.
 
         Args:
-            channel: Channel/group username or invite link.
+            channel: Channel/group username, invite link or numeric id (e.g. 2156914166 / -1002156914166).
             limit: Number of messages to fetch (max 100 per call).
             offset_id: Fetch messages older than this message ID (0 = from newest).
             download_media: If True, download all media (photos/videos/docs/voice) to MEDIA_DIR
@@ -496,7 +526,7 @@ class TelegramTestClient:
         if not self.client:
             raise Exception("Not connected")
 
-        entity = await self.client.get_entity(channel)
+        entity = await self._resolve_identifier(channel)
 
         messages = await self.client.get_messages(
             entity,

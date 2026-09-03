@@ -29,7 +29,7 @@ _ai: AIHelper | None = None
 
 _PEER_PROPERTY = {
     "type": "string",
-    "description": "Username or identifier of the peer (user/bot/group) to interact with. If not provided, uses the default peer set via telegram_set_bot.",
+    "description": "Username, t.me link or numeric id of the peer (user/bot/group/private group) to interact with. If not provided, uses the default peer set via telegram_set_bot.",
 }
 
 
@@ -407,7 +407,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "channel": {
                         "type": "string",
-                        "description": "Channel, group, or user username (e.g. 'durov' or 'https://t.me/durov')",
+                        "description": "Channel, group or user: username ('durov'), t.me link, or numeric id for private groups/channels (e.g. '2156914166' or '-1002156914166')",
                     },
                     "limit": {
                         "type": ["integer", "string"],
