@@ -22,3 +22,7 @@ telegram-mcp-auth = "telegram_mcp.auth:main"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+[dependency-groups]
+dev = [
+    "pytest (>=9.1.1,<10.0.0)"
+]

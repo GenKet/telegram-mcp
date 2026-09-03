@@ -45,18 +45,26 @@ OPENAI_API_KEY=sk-...
 
 ### 4. Authorize (obtain SESSION_STRING)
 
-Run the auth command:
+Interactive flow — asks for the code on stdin:
 
 ```bash
 poetry run telegram-mcp-auth
 ```
 
-You'll receive an SMS code. After entering it you'll get a SESSION_STRING.
-Add it to `.env`:
+Step-by-step flow — each step is its own process, so it works from scripts and agents
+(no interactive stdin needed):
 
-```env
-SESSION_STRING="your_session_string_here"
+```bash
+poetry run telegram-mcp-auth request              # sends the login code
+poetry run telegram-mcp-auth code 12345           # submits it
+poetry run telegram-mcp-auth password secret      # only if the account has 2FA
+poetry run telegram-mcp-auth status               # is the current session still alive?
 ```
+
+The code arrives in the Telegram app itself when the account has another active session,
+otherwise by SMS. Both flows write the new `SESSION_STRING` into `.env` **and** into the
+`telegram` MCP server entry of `~/.claude.json` (pass `--no-claude-config` to skip the
+latter), so afterwards you only need to reconnect the server with `/mcp` in Claude Code.
 
 **Why StringSession:**
 - No session file on disk

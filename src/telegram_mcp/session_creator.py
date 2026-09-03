@@ -95,6 +95,33 @@ class TelegramSessionCreator:
         session_string = self._client.session.save()
         return session_string
 
+    def save_session(self) -> str:
+        """Serialize the current session, even if authorization is not finished yet."""
+        if not self._client:
+            raise ValueError("No active client")
+        return self._client.session.save()
+
+    @property
+    def phone_code_hash(self) -> Optional[str]:
+        return self._phone_code_hash
+
+    async def attach(self, session_string: str, phone_code_hash: Optional[str] = None) -> None:
+        """Reconnect to a session saved mid-authorization (no authorization check).
+
+        Lets the code/2FA steps run as separate processes: the auth key stays the same,
+        so Telegram keeps the pending login attached to it.
+        """
+        self._client = self._create_client(StringSession(session_string))
+        await self._client.connect()
+        self._phone_code_hash = phone_code_hash
+
+    async def complete_2fa(self, password: str) -> str:
+        """Finish a login that stopped at the 2FA prompt — the code is already accepted."""
+        if not self._client:
+            raise ValueError("Must call attach or request_code first")
+        await self._client.sign_in(password=password)
+        return self._client.session.save()
+
     async def create_from_session_string(self, session_string: str) -> TelegramClient:
         """
         Create a connected client from an existing session string.

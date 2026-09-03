@@ -4,6 +4,7 @@
 # Telegram session files
 *.session
 *.session-journal
+.auth_state.json
 
 # Python
 __pycache__/
