@@ -1,7 +1,9 @@
 """Telegram client wrapper using Telethon with StringSession support."""
 
 import asyncio
+import json
 import os
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from telethon.sessions import StringSession
 from telethon.tl.types import (
@@ -29,6 +31,9 @@ DEFAULT_RESPONSE_TIMEOUT = 8.0
 
 # Directory for downloaded media (auto-created on first use)
 MEDIA_DIR = "/tmp/tg_mcp_media"
+
+# Directory for chat exports (auto-created on first use)
+EXPORT_DIR = "/tmp/tg_mcp_export"
 
 
 class TelegramTestClient:
@@ -507,12 +512,183 @@ class TelegramTestClient:
 
         return {"error": "No WebApp button found"}
 
+    @staticmethod
+    def _parse_date(value: Optional[str]) -> Optional[datetime]:
+        """Parse an ISO date/datetime ('2026-09-02', '2026-09-02T18:00') into aware UTC."""
+        if not value:
+            return None
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    def _history_item(self, msg: Message) -> Dict[str, Any]:
+        """Common message shape for history reads, exports and digests."""
+        item = {
+            "id": msg.id,
+            "date": msg.date.isoformat() if msg.date else None,
+            "text": msg.text or "",
+        }
+        if msg.sender:
+            item["sender"] = getattr(msg.sender, "title", None) or getattr(msg.sender, "first_name", None)
+        media_type = self._media_type(msg)
+        if media_type:
+            item["media_type"] = media_type
+        return item
+
+    async def _iter_history(
+        self,
+        entity,
+        limit: Optional[int] = None,
+        offset_id: int = 0,
+        topic_id: Optional[int] = None,
+        min_date: Optional[datetime] = None,
+        max_date: Optional[datetime] = None,
+    ):
+        """Yield messages newest-first, honouring a date window and a forum topic."""
+        kwargs: Dict[str, Any] = {}
+        if offset_id:
+            kwargs["offset_id"] = offset_id
+        if max_date:
+            kwargs["offset_date"] = max_date
+        if topic_id:
+            kwargs["reply_to"] = topic_id
+
+        async for msg in self.client.iter_messages(entity, limit=limit, **kwargs):
+            if min_date and msg.date and msg.date < min_date:
+                return
+            yield msg
+
+    async def list_topics(self, peer: str, limit: int = 100) -> Dict[str, Any]:
+        """List forum topics of a supergroup, so a single topic can be read on its own."""
+        if not self.client:
+            raise Exception("Not connected")
+
+        from telethon.tl.functions.messages import GetForumTopicsRequest
+
+        entity = await self._resolve_identifier(peer)
+        info = self._describe_entity(entity)
+        if not getattr(entity, "forum", False):
+            return {**info, "is_forum": False, "topics": [], "note": "not a forum — read it as a plain chat"}
+
+        found = await self.client(
+            GetForumTopicsRequest(
+                peer=entity, offset_date=None, offset_id=0, offset_topic=0, limit=min(limit, 100)
+            )
+        )
+        topics = [
+            {
+                "id": topic.id,
+                "title": topic.title,
+                "closed": getattr(topic, "closed", False),
+                "top_message_id": getattr(topic, "top_message", None),
+            }
+            for topic in found.topics
+            if hasattr(topic, "title")
+        ]
+        topics = topics[: min(limit, 100)]
+        return {**info, "is_forum": True, "topics": topics, "count": len(topics)}
+
+    async def collect_messages(
+        self,
+        peer: Optional[str] = None,
+        limit: int = 200,
+        topic_id: Optional[int] = None,
+        min_date: Optional[str] = None,
+        max_date: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Collect messages (oldest-first) for further processing — digests, analysis."""
+        if not self.client:
+            raise Exception("Not connected")
+
+        entity = await self._resolve_identifier(peer) if peer else await self._resolve_peer()
+        items = [
+            self._history_item(msg)
+            async for msg in self._iter_history(
+                entity,
+                limit=limit,
+                topic_id=topic_id,
+                min_date=self._parse_date(min_date),
+                max_date=self._parse_date(max_date),
+            )
+        ]
+        items.reverse()
+        return items
+
+    async def export_chat(
+        self,
+        peer: str,
+        out_path: Optional[str] = None,
+        fmt: str = "jsonl",
+        limit: Optional[int] = None,
+        topic_id: Optional[int] = None,
+        min_date: Optional[str] = None,
+        max_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Stream a chat's history into a local file and return stats, not the messages.
+
+        Keeps whole-history dumps out of the model context: the file is written
+        message by message, so a 16k-message chat costs one short response.
+        """
+        if not self.client:
+            raise Exception("Not connected")
+        if fmt not in ("jsonl", "md"):
+            raise Exception("fmt must be 'jsonl' or 'md'")
+
+        entity = await self._resolve_identifier(peer)
+        info = self._describe_entity(entity)
+
+        if out_path is None:
+            os.makedirs(EXPORT_DIR, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            out_path = os.path.join(EXPORT_DIR, f"chat_{entity.id}_{stamp}.{fmt}")
+
+        count = 0
+        newest_date = oldest_date = None
+        oldest_id = None
+
+        with open(out_path, "w", encoding="utf-8") as handle:
+            if fmt == "md":
+                handle.write(f"# {info['name'] or peer} (id {entity.id})\n\n")
+            async for msg in self._iter_history(
+                entity,
+                limit=limit,
+                topic_id=topic_id,
+                min_date=self._parse_date(min_date),
+                max_date=self._parse_date(max_date),
+            ):
+                item = self._history_item(msg)
+                if fmt == "jsonl":
+                    handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+                else:
+                    handle.write(
+                        f"**{item.get('sender') or 'unknown'}** · {item['date']}"
+                        f"{' · [' + item['media_type'] + ']' if item.get('media_type') else ''}\n"
+                        f"{item['text']}\n\n"
+                    )
+                count += 1
+                newest_date = newest_date or item["date"]
+                oldest_date = item["date"]
+                oldest_id = item["id"]
+
+        return {
+            "peer": info,
+            "path": out_path,
+            "format": fmt,
+            "count": count,
+            "newest_date": newest_date,
+            "oldest_date": oldest_date,
+            "oldest_id": oldest_id,
+            "size_bytes": os.path.getsize(out_path),
+        }
+
     async def read_channel(
         self,
         channel: str,
         limit: int = 100,
         offset_id: int = 0,
         download_media: bool = True,
+        topic_id: Optional[int] = None,
+        min_date: Optional[str] = None,
+        max_date: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Read messages from a channel/group with pagination.
 
@@ -522,49 +698,52 @@ class TelegramTestClient:
             offset_id: Fetch messages older than this message ID (0 = from newest).
             download_media: If True, download all media (photos/videos/docs/voice) to MEDIA_DIR
                 and include local file paths in the response.
+            topic_id: Read only this forum topic (see list_topics).
+            min_date: Stop at messages older than this ISO date/datetime.
+            max_date: Start from messages older than this ISO date/datetime.
         """
         if not self.client:
             raise Exception("Not connected")
 
         entity = await self._resolve_identifier(channel)
+        capped = min(limit, 100)
 
-        messages = await self.client.get_messages(
-            entity,
-            limit=min(limit, 100),
-            offset_id=offset_id,
-        )
+        messages = [
+            msg
+            async for msg in self._iter_history(
+                entity,
+                limit=capped,
+                offset_id=offset_id,
+                topic_id=topic_id,
+                min_date=self._parse_date(min_date),
+                max_date=self._parse_date(max_date),
+            )
+        ]
 
         media_paths = await self._bulk_download(messages) if download_media else {}
 
         formatted = []
         for msg in messages:
-            msg_data = {
-                "id": msg.id,
-                "date": msg.date.isoformat() if msg.date else None,
-                "text": msg.text or "",
-                "views": getattr(msg, "views", None),
-                "forwards": getattr(msg, "forwards", None),
-                "has_photo": bool(msg.photo),
-                "has_video": bool(msg.video),
-                "has_document": bool(msg.document),
-            }
-            media_type = self._media_type(msg)
-            if media_type:
-                msg_data["media_type"] = media_type
+            item = self._history_item(msg)
+            item.update(
+                {
+                    "views": getattr(msg, "views", None),
+                    "forwards": getattr(msg, "forwards", None),
+                    "has_photo": bool(msg.photo),
+                    "has_video": bool(msg.video),
+                    "has_document": bool(msg.document),
+                }
+            )
             if msg.id in media_paths:
-                msg_data["media_path"] = media_paths[msg.id]
-            if msg.sender:
-                msg_data["sender"] = getattr(msg.sender, "title", None) or getattr(msg.sender, "first_name", None)
-            formatted.append(msg_data)
-
-        oldest_id = messages[-1].id if messages else None
+                item["media_path"] = media_paths[msg.id]
+            formatted.append(item)
 
         return {
             "channel": channel,
             "messages": formatted,
             "count": len(formatted),
-            "oldest_id": oldest_id,
-            "has_more": len(messages) == min(limit, 100),
+            "oldest_id": messages[-1].id if messages else None,
+            "has_more": len(messages) == capped,
         }
 
     def _describe_entity(self, entity) -> Dict[str, Any]:
@@ -635,6 +814,9 @@ class TelegramTestClient:
         limit: int = 50,
         offset_id: int = 0,
         from_user: Optional[str] = None,
+        topic_id: Optional[int] = None,
+        min_date: Optional[str] = None,
+        max_date: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Server-side message search inside one peer, or across all chats when peer is None.
 
@@ -644,6 +826,9 @@ class TelegramTestClient:
             limit: Max messages to return (max 100).
             offset_id: Return messages older than this id (pagination).
             from_user: Only messages from this sender (per-peer search only).
+            topic_id: Restrict to one forum topic (see list_topics).
+            min_date: Ignore messages older than this ISO date/datetime.
+            max_date: Start from messages older than this ISO date/datetime.
         """
         if not self.client:
             raise Exception("Not connected")
@@ -651,27 +836,27 @@ class TelegramTestClient:
         entity = await self._resolve_identifier(peer) if peer else None
         sender = await self._resolve_identifier(from_user) if from_user else None
 
+        floor = self._parse_date(min_date)
+        ceiling = self._parse_date(max_date)
+
         kwargs = {"search": query, "limit": min(limit, 100)}
         if offset_id:
             kwargs["offset_id"] = offset_id
         if sender is not None:
             kwargs["from_user"] = sender
+        if topic_id:
+            kwargs["reply_to"] = topic_id
+        if ceiling:
+            kwargs["offset_date"] = ceiling
 
         messages = []
         async for msg in self.client.iter_messages(entity, **kwargs):
-            item = {
-                "id": msg.id,
-                "date": msg.date.isoformat() if msg.date else None,
-                "text": msg.text or "",
-            }
-            if msg.sender:
-                item["sender"] = getattr(msg.sender, "title", None) or getattr(msg.sender, "first_name", None)
+            if floor and msg.date and msg.date < floor:
+                break
+            item = self._history_item(msg)
             if entity is None and msg.chat:
                 item["chat"] = getattr(msg.chat, "title", None) or getattr(msg.chat, "first_name", None)
                 item["chat_id"] = msg.chat.id
-            media_type = self._media_type(msg)
-            if media_type:
-                item["media_type"] = media_type
             messages.append(item)
 
         return {

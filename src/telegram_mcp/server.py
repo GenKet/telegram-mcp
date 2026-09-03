@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,10 +28,30 @@ _client: TelegramTestClient | None = None
 _connected: bool = False
 _ai: AIHelper | None = None
 
+_TOPIC_PROPERTY = {
+    "type": ["integer", "string"],
+    "description": "Forum topic id — read only that topic (get ids from telegram_list_topics)",
+}
+
+_MIN_DATE_PROPERTY = {
+    "type": "string",
+    "description": "Ignore messages older than this ISO date/datetime, e.g. '2026-09-02' or '2026-09-02T18:00'",
+}
+
+_MAX_DATE_PROPERTY = {
+    "type": "string",
+    "description": "Start from messages older than this ISO date/datetime (upper bound of the window)",
+}
+
 _PEER_PROPERTY = {
     "type": "string",
     "description": "Username, t.me link or numeric id of the peer (user/bot/group/private group) to interact with. If not provided, uses the default peer set via telegram_set_bot.",
 }
+
+
+def _optional_int(value: Any) -> int | None:
+    """Tool arguments arrive as strings just as often as ints."""
+    return int(value) if value not in (None, "") else None
 
 
 def get_ai() -> AIHelper:
@@ -424,6 +445,9 @@ async def list_tools() -> list[Tool]:
                         "description": "Download all media (photos/videos/docs/voice) to /tmp/tg_mcp_media and include 'media_path' per message (default: true)",
                         "default": True,
                     },
+                    "topic_id": _TOPIC_PROPERTY,
+                    "min_date": _MIN_DATE_PROPERTY,
+                    "max_date": _MAX_DATE_PROPERTY,
                 },
                 "required": ["channel"],
             },
@@ -474,8 +498,101 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Only messages from this sender (username or numeric id). Single-chat search only.",
                     },
+                    "topic_id": _TOPIC_PROPERTY,
+                    "min_date": _MIN_DATE_PROPERTY,
+                    "max_date": _MAX_DATE_PROPERTY,
                 },
                 "required": ["query"],
+            },
+        ),
+        Tool(
+            name="telegram_list_topics",
+            description=(
+                "List forum topics of a supergroup with their ids, so a single topic can be read "
+                "instead of the whole mixed stream. Reports is_forum=false for plain chats."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "peer": _PEER_PROPERTY,
+                    "limit": {
+                        "type": ["integer", "string"],
+                        "description": "Max topics to return (default: 100)",
+                        "default": 100,
+                    },
+                },
+                "required": ["peer"],
+            },
+        ),
+        Tool(
+            name="telegram_export_chat",
+            description=(
+                "Export a chat's history to a local file (jsonl or md) and return only the path and stats. "
+                "Use this instead of paginating telegram_read_channel for big dumps — the messages never "
+                "pass through the conversation, so a 16k-message chat costs one short response."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "peer": _PEER_PROPERTY,
+                    "out_path": {
+                        "type": "string",
+                        "description": "Where to write the file (default: /tmp/tg_mcp_export/chat_<id>_<timestamp>.<fmt>)",
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["jsonl", "md"],
+                        "description": "jsonl for machine reading (default), md for a readable transcript",
+                        "default": "jsonl",
+                    },
+                    "limit": {
+                        "type": ["integer", "string"],
+                        "description": "Max messages to export (default: whole history in the given window)",
+                    },
+                    "topic_id": _TOPIC_PROPERTY,
+                    "min_date": _MIN_DATE_PROPERTY,
+                    "max_date": _MAX_DATE_PROPERTY,
+                },
+                "required": ["peer"],
+            },
+        ),
+        Tool(
+            name="telegram_digest",
+            description=(
+                "Summarize a period of a chat via GPT — what broke, who did what, what is still open. "
+                "Optionally sends the summary to a peer ('me' = Saved Messages)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "peer": _PEER_PROPERTY,
+                    "hours": {
+                        "type": ["integer", "string"],
+                        "description": "Summarize the last N hours (default: 12). Ignored when min_date is given.",
+                        "default": 12,
+                    },
+                    "min_date": _MIN_DATE_PROPERTY,
+                    "max_date": _MAX_DATE_PROPERTY,
+                    "topic_id": _TOPIC_PROPERTY,
+                    "limit": {
+                        "type": ["integer", "string"],
+                        "description": "Max messages to feed the model (default: 300)",
+                        "default": 300,
+                    },
+                    "send_to": {
+                        "type": "string",
+                        "description": "Send the summary to this peer — 'me' for Saved Messages. Omit to only return it.",
+                    },
+                    "system": {
+                        "type": "string",
+                        "description": "Optional system prompt to change focus or language of the summary",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "OpenAI chat model (default: gpt-4o-mini)",
+                    },
+                },
+                "required": ["peer"],
             },
         ),
         Tool(
@@ -577,7 +694,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             offset_id = int(arguments.get("offset_id", 0))
             download_media = bool(arguments.get("download_media", True))
             result = await client.read_channel(
-                channel, limit=limit, offset_id=offset_id, download_media=download_media,
+                channel,
+                limit=limit,
+                offset_id=offset_id,
+                download_media=download_media,
+                topic_id=_optional_int(arguments.get("topic_id")),
+                min_date=arguments.get("min_date"),
+                max_date=arguments.get("max_date"),
             )
 
         elif name == "telegram_find_chat":
@@ -593,7 +716,70 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 limit=int(arguments.get("limit", 50)),
                 offset_id=int(arguments.get("offset_id", 0)),
                 from_user=arguments.get("from_user"),
+                topic_id=_optional_int(arguments.get("topic_id")),
+                min_date=arguments.get("min_date"),
+                max_date=arguments.get("max_date"),
             )
+
+        elif name == "telegram_list_topics":
+            result = await client.list_topics(
+                arguments["peer"],
+                limit=int(arguments.get("limit", 100)),
+            )
+
+        elif name == "telegram_export_chat":
+            limit = arguments.get("limit")
+            result = await client.export_chat(
+                arguments["peer"],
+                out_path=arguments.get("out_path"),
+                fmt=arguments.get("format", "jsonl"),
+                limit=int(limit) if limit else None,
+                topic_id=_optional_int(arguments.get("topic_id")),
+                min_date=arguments.get("min_date"),
+                max_date=arguments.get("max_date"),
+            )
+
+        elif name == "telegram_digest":
+            ai = get_ai()
+            min_date = arguments.get("min_date")
+            if not min_date:
+                hours = int(arguments.get("hours", 12))
+                min_date = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+            messages = await client.collect_messages(
+                peer=arguments["peer"],
+                limit=int(arguments.get("limit", 300)),
+                topic_id=_optional_int(arguments.get("topic_id")),
+                min_date=min_date,
+                max_date=arguments.get("max_date"),
+            )
+            if not messages:
+                result = {"summary": None, "messages_analyzed": 0, "note": "no messages in this period"}
+            else:
+                transcript = "\n".join(
+                    f"[{m['date']}] {m.get('sender') or 'unknown'}: {m['text']}"
+                    + (f" <{m['media_type']}>" if m.get("media_type") else "")
+                    for m in messages
+                )
+                summary = await ai.generate_text(
+                    prompt=f"Сообщения чата за период:\n\n{transcript}",
+                    system=arguments.get("system")
+                    or (
+                        "Ты дежурный инженер. Сожми переписку в сводку на русском: "
+                        "1) что сломалось и как решили, 2) что ещё висит без ответа, "
+                        "3) кто чем занимался. Коротко, пунктами, без воды."
+                    ),
+                    model=arguments.get("model"),
+                )
+                result = {
+                    "summary": summary,
+                    "messages_analyzed": len(messages),
+                    "period": {"from": messages[0]["date"], "to": messages[-1]["date"]},
+                }
+                send_to = arguments.get("send_to")
+                if send_to:
+                    await client.send_message(summary, peer=send_to)
+                    result["sent_to"] = send_to
 
         elif name == "telegram_download_media":
             message_id = int(arguments["message_id"])

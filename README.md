@@ -162,11 +162,53 @@ button_text: "Open app"   // optional — first WebApp button if omitted
 #### `telegram_read_channel`
 Read history from a channel, group, or user chat with pagination. Media is auto-downloaded by default.
 ```
-channel: "durov"
+channel: "durov"        // username, t.me link, or numeric id: 2156914166 / -1002156914166
 limit: 100
 offset_id: 0            // use oldest_id from previous response for pagination
 download_media: true    // default true — set false to skip media downloads
+topic_id: 3             // optional — read a single forum topic
+min_date: "2026-09-02T18:00"   // optional date window
+max_date: "2026-09-02T23:00"
 ```
+Private groups and channels work by numeric id as long as the account is a member — no
+`access_hash` needed. The same is true of the `peer` parameter of every other tool.
+
+#### `telegram_find_chat`
+Find chats by a name/username substring and get their numeric ids. Empty query lists recent dialogs.
+```
+query: "weekly"    // matches your dialogs and public peers you are not a member of
+limit: 20
+```
+
+#### `telegram_search_messages`
+Server-side text search in one chat, or across all chats when `peer` is omitted. Much cheaper
+than paginating the whole history.
+```
+query: "timeout"
+peer: "2156914166"   // omit for a global search
+from_user: "egor"    // optional, single-chat search only
+topic_id: 3          // optional
+min_date: "2026-09-01"
+```
+
+#### `telegram_list_topics`
+List forum topics of a supergroup with their ids. Returns `is_forum: false` for plain chats.
+```
+peer: "2126855055"
+limit: 100
+```
+
+#### `telegram_export_chat`
+Dump history to a local file and return only the path and stats — the messages never pass
+through the conversation, so exporting a 16k-message chat costs one short response.
+```
+peer: "2156914166"
+format: "jsonl"      // or "md" for a readable transcript
+limit: 5000          // optional — default is the whole window
+topic_id: 3          // optional
+min_date: "2026-08-01"
+```
+Default location is `/tmp/tg_mcp_export/chat_<id>_<timestamp>.<fmt>`.
 
 #### `telegram_download_media`
 Download media of a specific message by id.
@@ -204,6 +246,17 @@ Download a voice message or video note from the chat and transcribe it with Whis
 peer:       "some_user"   // optional
 message_id: 12345         // optional — latest voice/video_note if omitted
 language:   "en"          // optional ISO hint for accuracy
+```
+
+#### `telegram_digest`
+Summarize a period of a chat via GPT — what broke, who did what, what is still open.
+```
+peer: "2156914166"
+hours: 12              // or an explicit min_date/max_date window
+topic_id: 3            // optional
+limit: 300             // max messages fed to the model
+send_to: "me"          // optional — "me" delivers the summary to Saved Messages
+system: "..."          // optional — change focus or language
 ```
 
 #### `telegram_analyze_voice`
