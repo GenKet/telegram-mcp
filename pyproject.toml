@@ -18,6 +18,7 @@ cryptography = ">=50.0.1"  # GHSA-g6cj-pr64-35w5 (transitive via pyjwt)
 [tool.poetry.scripts]
 telegram-mcp = "telegram_mcp.server:main"
 telegram-mcp-auth = "telegram_mcp.auth:main"
+telegram-mcp-listen = "telegram_mcp.listener:main"
 
 [build-system]
 requires = ["poetry-core"]

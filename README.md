@@ -71,6 +71,18 @@ latter), so afterwards you only need to reconnect the server with `/mcp` in Clau
 - Safe to store in environment variables
 - Easy to move between machines
 
+### Interview listener (optional)
+
+The interview tools work without it, but replies are then noticed only when Claude
+looks. Run the listener to have replies recorded the moment they arrive:
+
+```bash
+poetry run telegram-mcp-listen
+```
+
+It records incoming replies of active interviews into `~/.telegram-mcp/interviews/`
+and writes a heartbeat there. It never sends anything to the interviewee.
+
 ### 5. Configure Claude Code
 
 Add to `~/.claude/claude_desktop_config.json`:
