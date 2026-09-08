@@ -14,6 +14,8 @@ from mcp.types import Tool, TextContent
 
 from .client import TelegramTestClient
 from .ai import AIHelper
+from . import interview_rules as rules
+from . import interview_store as store
 
 # Load environment variables from project root
 _project_root = Path(__file__).parent.parent.parent
@@ -596,6 +598,58 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="telegram_interview_start",
+            description=(
+                "Create a brief-gathering interview in 'draft': store the goal and the checklist "
+                "of questions YOU generated. Sends nothing — show the first message to the owner first."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Short slug identifying the interview, e.g. 'clientx-site'"},
+                    "peer": _PEER_PROPERTY,
+                    "goal": {"type": "string", "description": "What the owner wants to find out, in their own words"},
+                    "questions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Checklist of questions to close, one per point",
+                    },
+                    "max_messages": {
+                        "type": ["integer", "string"],
+                        "description": "Stop and ask the owner after this many sent messages (default: 10)",
+                        "default": 10,
+                    },
+                },
+                "required": ["id", "peer", "goal", "questions"],
+            },
+        ),
+        Tool(
+            name="telegram_interview_send",
+            description=(
+                "Send a message to the interviewee and record which checklist items it asks about. "
+                "Refuses when the peer has not replied yet, the message limit is reached, or the "
+                "interview is finished or escalated."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Interview id"},
+                    "text": {"type": "string", "description": "Exact text to send"},
+                    "covers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Checklist item ids this message asks about, e.g. ['q1','q2']",
+                    },
+                },
+                "required": ["id", "text"],
+            },
+        ),
+        Tool(
+            name="telegram_interview_list",
+            description="List interviews with status, checklist progress, who spoke last, and whether the listener daemon is alive.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
             name="telegram_download_media",
             description="Download media of a specific message by its id. Returns the local file path so it can be read/viewed.",
             inputSchema={
@@ -780,6 +834,68 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 if send_to:
                     await client.send_message(summary, peer=send_to)
                     result["sent_to"] = send_to
+
+        elif name == "telegram_interview_start":
+            state = store.create(
+                arguments["id"],
+                arguments["peer"],
+                arguments["goal"],
+                list(arguments["questions"]),
+                max_messages=int(arguments.get("max_messages", 10)),
+            )
+            result = {
+                "id": state["id"],
+                "status": state["status"],
+                "checklist": state["checklist"],
+                "note": "draft created, nothing sent — show the first message to the owner, then call telegram_interview_send",
+            }
+
+        elif name == "telegram_interview_send":
+            state = store.load(arguments["id"])
+            allowed, reason = rules.can_send(state, datetime.now(timezone.utc))
+            if not allowed:
+                result = {"sent": False, "reason": reason, "status": state["status"]}
+            else:
+                sent = await client.send_plain(arguments["text"], peer=state["peer"])
+                state["peer_id"] = sent["peer_id"]
+                rules.record_sent(
+                    state,
+                    arguments["text"],
+                    message_id=sent["message_id"],
+                    covers=list(arguments.get("covers") or []),
+                    now=datetime.now(timezone.utc),
+                )
+                store.save(state)
+                result = {
+                    "sent": True,
+                    "status": state["status"],
+                    "message_id": sent["message_id"],
+                    "sent_count": state["sent_count"],
+                    "open_items": [item["id"] for item in rules.open_items(state)],
+                }
+
+        elif name == "telegram_interview_list":
+            age = store.heartbeat_age()
+            result = {
+                "listener": "never started"
+                if age is None
+                else (f"alive {int(age)}s ago" if age < 60 else f"dead, last seen {int(age)}s ago"),
+                "interviews": [
+                    {
+                        "id": state["id"],
+                        "peer": state["peer"],
+                        "status": state["status"],
+                        "escalation": state["escalation"],
+                        "closed_items": sum(
+                            1 for item in state["checklist"] if item["status"] in rules.CLOSED_STATUSES
+                        ),
+                        "total_items": len(state["checklist"]),
+                        "last_sender": rules.last_sender(state),
+                        "sent_count": state["sent_count"],
+                    }
+                    for state in store.load_all()
+                ],
+            }
 
         elif name == "telegram_download_media":
             message_id = int(arguments["message_id"])

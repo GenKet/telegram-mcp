@@ -254,6 +254,23 @@ class TelegramTestClient:
         responses = await self._await_response(entity, last_id=sent.id)
         return self._format_messages(responses)
 
+    async def send_plain(self, text: str, peer: Optional[str] = None) -> Dict[str, Any]:
+        """Send a message and return its id, without waiting for a reply.
+
+        send_message() blocks in _await_response, which fits bot testing but not
+        interviews, where the answer may land hours later.
+        """
+        if not self.client:
+            raise Exception("Not connected")
+
+        entity = await self._resolve_peer(peer)
+        sent = await self.client.send_message(entity, text)
+        return {
+            "message_id": sent.id,
+            "date": sent.date.isoformat() if sent.date else None,
+            "peer_id": entity.id,
+        }
+
     async def click_button(self, button_text: str, peer: Optional[str] = None) -> Dict[str, Any]:
         """Click a button (reply keyboard or inline)."""
         if not self.client:
