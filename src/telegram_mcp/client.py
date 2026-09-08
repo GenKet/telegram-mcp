@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from telethon.sessions import StringSession
 from telethon.tl.types import (
     ReplyKeyboardMarkup,
@@ -612,6 +612,30 @@ class TelegramTestClient:
         ]
         items.reverse()
         return items
+
+    async def messages_since(
+        self,
+        peer: str,
+        after_id: int = 0,
+        limit: int = 100,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """History newer than after_id, oldest-first, plus the resolved peer id.
+
+        This is the catch-up path for interviews: it reads the chat itself instead of
+        trusting the listener, so a dead daemon costs speed but never correctness.
+        """
+        if not self.client:
+            raise Exception("Not connected")
+
+        entity = await self._resolve_identifier(peer)
+        messages = await self.client.get_messages(entity, limit=min(limit, 100), min_id=after_id)
+
+        items = []
+        for msg in reversed(messages):
+            item = self._history_item(msg)
+            item["from"] = "me" if msg.out else "peer"
+            items.append(item)
+        return items, entity.id
 
     async def export_chat(
         self,
