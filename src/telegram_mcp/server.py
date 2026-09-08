@@ -650,6 +650,77 @@ async def list_tools() -> list[Tool]:
             inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
+            name="telegram_interview_pending",
+            description=(
+                "Fetch unprocessed replies for an interview and the current checklist. Always re-reads "
+                "the chat itself, so it works even if the listener daemon was down."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"id": {"type": "string", "description": "Interview id"}},
+                "required": ["id"],
+            },
+        ),
+        Tool(
+            name="telegram_interview_mark",
+            description=(
+                "Record what the replies answered: close checklist items and advance the processed-message "
+                "pointer. Call this after reading telegram_interview_pending."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Interview id"},
+                    "marks": {
+                        "type": "array",
+                        "description": "One entry per checklist item you are closing",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "item_id": {"type": "string", "description": "Checklist item id, e.g. 'q1'"},
+                                "status": {"type": "string", "enum": ["answered", "skipped"], "default": "answered"},
+                                "answer": {"type": "string", "description": "The answer distilled from the reply"},
+                            },
+                            "required": ["item_id"],
+                        },
+                    },
+                    "seen_up_to": {
+                        "type": ["integer", "string"],
+                        "description": "Highest peer message id you processed (from telegram_interview_pending)",
+                    },
+                },
+                "required": ["id", "marks"],
+            },
+        ),
+        Tool(
+            name="telegram_interview_escalate",
+            description=(
+                "Hand the conversation back to the owner without answering the peer — for questions outside "
+                "the checklist: price, deadlines, contracts, a call request, or a negative turn."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Interview id"},
+                    "reason": {"type": "string", "description": "Why a human is needed, quoting the peer"},
+                },
+                "required": ["id", "reason"],
+            },
+        ),
+        Tool(
+            name="telegram_interview_finish",
+            description="Close the interview with a summary; 'send_to' delivers a copy (use 'me' for Saved Messages).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Interview id"},
+                    "summary": {"type": "string", "description": "The brief you assembled from the answers"},
+                    "send_to": {"type": "string", "description": "Peer to send the summary to — 'me' for Saved Messages"},
+                },
+                "required": ["id", "summary"],
+            },
+        ),
+        Tool(
             name="telegram_download_media",
             description="Download media of a specific message by its id. Returns the local file path so it can be read/viewed.",
             inputSchema={
@@ -896,6 +967,64 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     for state in store.load_all()
                 ],
             }
+
+        elif name == "telegram_interview_pending":
+            state = store.load(arguments["id"])
+            fetched, peer_id = await client.messages_since(
+                state["peer"], after_id=state["last_seen_message_id"]
+            )
+            state["peer_id"] = peer_id
+            added = rules.merge_messages(state, fetched)
+            store.save(state)
+            result = {
+                "id": state["id"],
+                "status": state["status"],
+                "new_messages": added,
+                "replies": rules.delta(state),
+                "checklist": state["checklist"],
+                "open_items": [item["id"] for item in rules.open_items(state)],
+                "sent_count": state["sent_count"],
+                "max_messages": state["max_messages"],
+            }
+
+        elif name == "telegram_interview_mark":
+            state = store.load(arguments["id"])
+            rules.mark_answers(
+                state,
+                list(arguments["marks"]),
+                seen_up_to=_optional_int(arguments.get("seen_up_to")),
+            )
+            store.save(state)
+            result = {
+                "id": state["id"],
+                "status": state["status"],
+                "open_items": [item["id"] for item in rules.open_items(state)],
+                "complete": rules.is_complete(state),
+            }
+
+        elif name == "telegram_interview_escalate":
+            state = store.load(arguments["id"])
+            rules.escalate(state, arguments["reason"])
+            store.save(state)
+            result = {"id": state["id"], "status": state["status"], "escalation": state["escalation"]}
+
+        elif name == "telegram_interview_finish":
+            state = store.load(arguments["id"])
+            rules.finish(state, arguments["summary"])
+            store.save(state)
+            result = {
+                "id": state["id"],
+                "status": state["status"],
+                "path": str(store.interview_path(state["id"])),
+                "answers": [
+                    {"question": item["question"], "answer": item["answer"], "status": item["status"]}
+                    for item in state["checklist"]
+                ],
+            }
+            send_to = arguments.get("send_to")
+            if send_to:
+                await client.send_plain(arguments["summary"], peer=send_to)
+                result["sent_to"] = send_to
 
         elif name == "telegram_download_media":
             message_id = int(arguments["message_id"])
