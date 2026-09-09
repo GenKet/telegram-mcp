@@ -91,3 +91,24 @@ def test_heartbeat_age_measures_seconds_since_write():
     store.heartbeat_write(now=1000.0)
 
     assert store.heartbeat_age(now=1042.0) == pytest.approx(42.0)
+
+
+def test_create_rejects_second_active_interview_for_same_peer():
+    store.create("first", "acmeuser", "goal", ["Q?"])
+
+    with pytest.raises(ValueError, match="already has an active interview"):
+        store.create("second", "acmeuser", "another goal", ["Q?"])
+
+
+def test_create_allows_new_interview_once_the_previous_is_done():
+    state = store.create("first", "acmeuser", "goal", ["Q?"])
+    state["status"] = "done"
+    store.save(state)
+
+    assert store.create("second", "acmeuser", "another goal", ["Q?"])["id"] == "second"
+
+
+def test_create_allows_same_id_pattern_for_different_peers():
+    store.create("first", "acmeuser", "goal", ["Q?"])
+
+    assert store.create("second", "otheruser", "goal", ["Q?"])["peer"] == "otheruser"

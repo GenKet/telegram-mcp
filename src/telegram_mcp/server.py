@@ -650,6 +650,31 @@ async def list_tools() -> list[Tool]:
             inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
+            name="telegram_ask",
+            description=(
+                "Ask a peer one thing the owner asked you to find out ('when can he meet?', "
+                "'is the invoice paid?') and send it right away — the owner's request IS the approval. "
+                "Creates a one-item interview, so the reply is tracked and reported back like any other. "
+                "For multi-point briefs use telegram_interview_start instead."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "peer": _PEER_PROPERTY,
+                    "text": {"type": "string", "description": "Exact message to send, phrased as the owner would"},
+                    "about": {
+                        "type": "string",
+                        "description": "What you need to learn, for the checklist, e.g. 'когда может встретиться'",
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "Optional interview id (default: ask-<peer>-<HHMMSS>)",
+                    },
+                },
+                "required": ["peer", "text", "about"],
+            },
+        ),
+        Tool(
             name="telegram_interview_pending",
             description=(
                 "Fetch unprocessed replies for an interview and the current checklist. Always re-reads "
@@ -966,6 +991,28 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     }
                     for state in store.load_all()
                 ],
+            }
+
+        elif name == "telegram_ask":
+            now = datetime.now(timezone.utc)
+            interview_id = arguments.get("id") or f"ask-{arguments['peer']}-{now.strftime('%H%M%S')}"
+            state = store.create(
+                interview_id,
+                arguments["peer"],
+                arguments["about"],
+                [arguments["about"]],
+                max_messages=4,
+            )
+            sent = await client.send_plain(arguments["text"], peer=state["peer"])
+            state["peer_id"] = sent["peer_id"]
+            rules.record_sent(state, arguments["text"], sent["message_id"], ["q1"], now)
+            store.save(state)
+            result = {
+                "id": state["id"],
+                "asked": arguments["about"],
+                "message_id": sent["message_id"],
+                "status": state["status"],
+                "note": "reply will be picked up by the listener; read it with telegram_interview_pending",
             }
 
         elif name == "telegram_interview_pending":

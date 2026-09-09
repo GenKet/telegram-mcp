@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULT_STATE_DIR = Path.home() / ".telegram-mcp"
 HEARTBEAT_NAME = "listener.heartbeat"
+ACTIVE_STATUSES = ("draft", "waiting", "needs_attention")
 
 
 def state_dir() -> Path:
@@ -44,6 +45,13 @@ def create(
     path = interview_path(interview_id)
     if path.exists():
         raise FileExistsError(f"interview '{interview_id}' already exists at {path}")
+
+    for existing in load_all():
+        if existing["peer"] == peer and existing["status"] in ACTIVE_STATUSES:
+            raise ValueError(
+                f"peer '{peer}' already has an active interview '{existing['id']}' "
+                f"({existing['status']}) — finish or escalate it first"
+            )
 
     state = {
         "id": interview_id,
