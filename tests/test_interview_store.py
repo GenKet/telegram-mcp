@@ -112,3 +112,23 @@ def test_create_allows_same_id_pattern_for_different_peers():
     store.create("first", "acmeuser", "goal", ["Q?"])
 
     assert store.create("second", "otheruser", "goal", ["Q?"])["peer"] == "otheruser"
+
+
+def test_heartbeat_reports_connection_state():
+    store.heartbeat_write(connected=False, now=1000.0)
+
+    status = store.heartbeat_status(now=1005.0)
+    assert status == {"age": pytest.approx(5.0), "connected": False}
+
+
+def test_heartbeat_status_is_none_without_file():
+    assert store.heartbeat_status() is None
+
+
+def test_heartbeat_status_reads_legacy_plain_timestamp():
+    """A heartbeat written by an older listener holds a bare float."""
+    (store.state_dir() / store.HEARTBEAT_NAME).write_text("1000.0")
+
+    status = store.heartbeat_status(now=1003.0)
+    assert status["age"] == pytest.approx(3.0)
+    assert status["connected"] is None

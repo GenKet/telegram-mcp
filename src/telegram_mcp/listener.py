@@ -61,7 +61,7 @@ async def run(rescan_seconds: float = 15.0) -> None:
             print(f"[{interview_id}] recorded reply {event.message.id}", flush=True)
 
     while True:
-        store.heartbeat_write()
+        store.heartbeat_write(connected=client.is_connected())
         fresh = _watched_peers()
         if fresh != watched:
             watched.clear()

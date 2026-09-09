@@ -51,6 +51,18 @@ _PEER_PROPERTY = {
 }
 
 
+def _describe_listener(beat: dict | None) -> str:
+    """Human-readable listener health — a live process with a dead link is not 'alive'."""
+    if beat is None:
+        return "never started"
+    age = int(beat["age"])
+    if age >= 60:
+        return f"dead, last seen {age}s ago — rely on telegram_interview_pending"
+    if beat["connected"] is False:
+        return f"process alive {age}s ago but DISCONNECTED — replies delayed, use telegram_interview_pending"
+    return f"alive {age}s ago"
+
+
 def _optional_int(value: Any) -> int | None:
     """Tool arguments arrive as strings just as often as ints."""
     return int(value) if value not in (None, "") else None
@@ -971,11 +983,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 }
 
         elif name == "telegram_interview_list":
-            age = store.heartbeat_age()
+            beat = store.heartbeat_status()
             result = {
-                "listener": "never started"
-                if age is None
-                else (f"alive {int(age)}s ago" if age < 60 else f"dead, last seen {int(age)}s ago"),
+                "listener": _describe_listener(beat),
                 "interviews": [
                     {
                         "id": state["id"],

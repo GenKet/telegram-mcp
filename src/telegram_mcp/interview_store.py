@@ -105,16 +105,36 @@ def load_all() -> List[Dict[str, Any]]:
     return [json.loads(p.read_text()) for p in sorted(state_dir().glob("*.json"))]
 
 
-def heartbeat_write(now: Optional[float] = None) -> Path:
-    """Record that the listener is alive."""
+def heartbeat_write(connected: bool = True, now: Optional[float] = None) -> Path:
+    """Record that the listener is alive AND whether its Telegram link is up.
+
+    A live process with a dead connection hears nothing, so the two facts must travel
+    together — otherwise 'listener alive' invites trusting pushes that never arrive.
+    """
     path = state_dir() / HEARTBEAT_NAME
-    path.write_text(str(now if now is not None else time.time()))
+    path.write_text(
+        json.dumps({"at": now if now is not None else time.time(), "connected": connected})
+    )
     return path
+
+
+def heartbeat_status(now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """{'age': seconds, 'connected': bool | None}, or None if the listener never ran."""
+    path = state_dir() / HEARTBEAT_NAME
+    if not path.exists():
+        return None
+
+    raw = path.read_text()
+    try:
+        payload = json.loads(raw)
+        written_at, connected = float(payload["at"]), payload.get("connected")
+    except (ValueError, KeyError, TypeError):
+        written_at, connected = float(raw), None  # heartbeat from an older listener
+
+    return {"age": (now if now is not None else time.time()) - written_at, "connected": connected}
 
 
 def heartbeat_age(now: Optional[float] = None) -> Optional[float]:
     """Seconds since the listener's last heartbeat, or None if it never wrote one."""
-    path = state_dir() / HEARTBEAT_NAME
-    if not path.exists():
-        return None
-    return (now if now is not None else time.time()) - float(path.read_text())
+    status = heartbeat_status(now)
+    return None if status is None else status["age"]
