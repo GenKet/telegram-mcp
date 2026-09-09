@@ -55,8 +55,13 @@ def record_sent(
     covers: List[str],
     now: datetime,
 ) -> Dict[str, Any]:
-    """Log an outgoing message and note which checklist items it asks about."""
+    """Log an outgoing message and note which checklist items it asks about.
+
+    The sent id also becomes the processed-message floor: chat history that predates
+    our question is not an answer to it, so catch-up reads must not surface it.
+    """
     state["messages"].append({"id": message_id, "from": "me", "text": text, "date": now.isoformat()})
+    state["last_seen_message_id"] = max(state["last_seen_message_id"], message_id)
     state["sent_count"] += 1
     state["status"] = "waiting"
     for item in state["checklist"]:

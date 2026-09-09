@@ -224,3 +224,34 @@ def test_finish_stores_summary_and_closes():
 
     assert state["status"] == "done"
     assert state["summary"] == "нужен лендинг за две недели"
+
+
+def test_record_sent_moves_seen_pointer_past_chat_history():
+    """The interview starts at our first question: older chat history is not a reply to it."""
+    state = make_state()
+
+    rules.record_sent(state, "первый вопрос", message_id=1874697, covers=["q1"], now=NOON)
+
+    assert state["last_seen_message_id"] == 1874697
+
+
+def test_record_sent_never_rewinds_seen_pointer():
+    state = make_state(last_seen_message_id=500, messages=[{"id": 400, "from": "peer", "text": "x", "date": None}])
+
+    rules.record_sent(state, "вопрос", message_id=300, covers=[], now=NOON)
+
+    assert state["last_seen_message_id"] == 500
+
+
+def test_delta_ignores_history_older_than_the_first_question():
+    state = make_state()
+    rules.record_sent(state, "вопрос", message_id=100, covers=["q1"], now=NOON)
+    rules.merge_messages(
+        state,
+        [
+            {"id": 50, "from": "peer", "text": "прошлогодняя болтовня", "date": None},
+            {"id": 101, "from": "peer", "text": "магазинчик", "date": None},
+        ],
+    )
+
+    assert [m["text"] for m in rules.delta(state)] == ["магазинчик"]
