@@ -125,6 +125,28 @@ def test_heartbeat_status_is_none_without_file():
     assert store.heartbeat_status() is None
 
 
+def test_heartbeat_keeps_a_bare_timestamp_file_for_older_readers():
+    """An MCP server running pre-upgrade code parses this file with float() — keep it a number."""
+    store.heartbeat_write(connected=True, now=1000.0)
+
+    assert float((store.state_dir() / store.HEARTBEAT_NAME).read_text()) == 1000.0
+
+
+def test_heartbeat_status_prefers_the_detailed_file():
+    store.heartbeat_write(connected=False, now=1000.0)
+
+    assert store.heartbeat_status(now=1000.0)["connected"] is False
+
+
+def test_heartbeat_status_falls_back_to_the_bare_timestamp():
+    """Only the legacy file exists — age is known, connection state is not."""
+    (store.state_dir() / store.HEARTBEAT_NAME).write_text("1000.0")
+
+    status = store.heartbeat_status(now=1004.0)
+    assert status["age"] == pytest.approx(4.0)
+    assert status["connected"] is None
+
+
 def test_heartbeat_status_reads_legacy_plain_timestamp():
     """A heartbeat written by an older listener holds a bare float."""
     (store.state_dir() / store.HEARTBEAT_NAME).write_text("1000.0")

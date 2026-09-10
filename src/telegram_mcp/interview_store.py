@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULT_STATE_DIR = Path.home() / ".telegram-mcp"
 HEARTBEAT_NAME = "listener.heartbeat"
+HEARTBEAT_STATUS_NAME = "listener.status.json"
 ACTIVE_STATUSES = ("draft", "waiting", "needs_attention")
 
 
@@ -111,25 +112,28 @@ def heartbeat_write(connected: bool = True, now: Optional[float] = None) -> Path
     A live process with a dead connection hears nothing, so the two facts must travel
     together — otherwise 'listener alive' invites trusting pushes that never arrive.
     """
+    written_at = now if now is not None else time.time()
     path = state_dir() / HEARTBEAT_NAME
-    path.write_text(
-        json.dumps({"at": now if now is not None else time.time(), "connected": connected})
+    # Two files on purpose: readers from before this change parse the bare timestamp with
+    # float(), so the detailed state has to live next to it rather than inside it.
+    path.write_text(str(written_at))
+    (state_dir() / HEARTBEAT_STATUS_NAME).write_text(
+        json.dumps({"at": written_at, "connected": connected})
     )
     return path
 
 
 def heartbeat_status(now: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """{'age': seconds, 'connected': bool | None}, or None if the listener never ran."""
-    path = state_dir() / HEARTBEAT_NAME
-    if not path.exists():
-        return None
-
-    raw = path.read_text()
-    try:
-        payload = json.loads(raw)
+    detailed = state_dir() / HEARTBEAT_STATUS_NAME
+    if detailed.exists():
+        payload = json.loads(detailed.read_text())
         written_at, connected = float(payload["at"]), payload.get("connected")
-    except (ValueError, KeyError, TypeError):
-        written_at, connected = float(raw), None  # heartbeat from an older listener
+    else:
+        path = state_dir() / HEARTBEAT_NAME
+        if not path.exists():
+            return None
+        written_at, connected = float(path.read_text()), None  # listener from before this change
 
     return {"age": (now if now is not None else time.time()) - written_at, "connected": connected}
 
