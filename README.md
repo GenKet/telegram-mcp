@@ -260,6 +260,37 @@ message_id: 12345         // optional — latest voice/video_note if omitted
 language:   "en"          // optional ISO hint for accuracy
 ```
 
+#### `telegram_ask`
+One-off question the owner asked you to put to someone — "when can he meet?", "is the
+invoice paid?". Sends immediately: the owner's request is the approval.
+```
+peer: "clientX"
+text: "Слушай, когда сможем встретиться на этой неделе?"
+about: "когда может встретиться"
+```
+The reply is tracked like any interview — read it with `telegram_interview_pending`.
+
+#### `telegram_interview_*`
+A brief-gathering interview: Claude turns a goal into a checklist, asks the peer, waits
+for answers across hours or days, asks the missing bits and delivers a summary.
+```
+id: "clientx-site"
+peer: "clientX"
+goal: "выяснить какой сайт нужен"
+questions: ["Что за сайт?", "Сроки?", "Референсы?"]
+```
+Flow: `interview_start` (draft, nothing sent) → owner approves the wording →
+`interview_send` → `interview_pending` (unprocessed replies) → `interview_mark` (what they
+answered) → `interview_send` again for the gaps → `interview_finish` (summary,
+`send_to: "me"` copies it to Saved Messages). `interview_escalate` hands the chat back to
+the owner **without answering the peer** — for price, deadlines, contracts, call requests.
+`interview_list` shows progress and listener health.
+
+Guards enforced by code, not by good intentions: no two messages in a row without a
+reply, `max_messages` (default 10) then `needs_human`, one active interview per peer, and
+the interview starts at its own first question so older chat history is never read as an
+answer. State lives in `~/.telegram-mcp/interviews/<id>.json`.
+
 #### `telegram_digest`
 Summarize a period of a chat via GPT — what broke, who did what, what is still open.
 ```
