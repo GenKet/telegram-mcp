@@ -203,6 +203,20 @@ topic_id: 3          // optional
 min_date: "2026-09-01"
 ```
 
+#### `telegram_get_thread`
+One message in context: what it replies to, and every reply to it. Messages everywhere
+carry `reply_to_id` (and `quote` when the sender quoted a fragment), so a chat no longer
+reads as a flat stream.
+```
+peer: "2156914166"
+message_id: 42735
+limit: 50
+scan: 300          // how far back to look in plain groups
+```
+Telegram keeps real threads only for forum topics and channel comments; in an ordinary
+group the tool scans recent history instead. The response says which path was used in
+`replies_found_via`.
+
 #### `telegram_list_topics`
 List forum topics of a supergroup with their ids. Returns `is_forum: false` for plain chats.
 ```

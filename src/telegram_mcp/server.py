@@ -520,6 +520,35 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="telegram_get_thread",
+            description=(
+                "Show one message in context: what it replies to and every reply to it. "
+                "Works in forums/channel comments via real threads and in plain groups by "
+                "scanning recent history."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "peer": _PEER_PROPERTY,
+                    "message_id": {
+                        "type": ["integer", "string"],
+                        "description": "The message whose thread you want",
+                    },
+                    "limit": {
+                        "type": ["integer", "string"],
+                        "description": "Max replies to return (default: 50)",
+                        "default": 50,
+                    },
+                    "scan": {
+                        "type": ["integer", "string"],
+                        "description": "How far back to scan in plain groups, in messages (default: 300)",
+                        "default": 300,
+                    },
+                },
+                "required": ["peer", "message_id"],
+            },
+        ),
+        Tool(
             name="telegram_list_topics",
             description=(
                 "List forum topics of a supergroup with their ids, so a single topic can be read "
@@ -881,6 +910,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 topic_id=_optional_int(arguments.get("topic_id")),
                 min_date=arguments.get("min_date"),
                 max_date=arguments.get("max_date"),
+            )
+
+        elif name == "telegram_get_thread":
+            result = await client.get_thread(
+                arguments["peer"],
+                int(arguments["message_id"]),
+                limit=int(arguments.get("limit", 50)),
+                scan=int(arguments.get("scan", 300)),
             )
 
         elif name == "telegram_list_topics":

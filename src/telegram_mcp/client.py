@@ -549,6 +549,15 @@ class TelegramTestClient:
         media_type = self._media_type(msg)
         if media_type:
             item["media_type"] = media_type
+
+        # Without this a chat reads as a flat stream and "who answered whom" is lost.
+        reply = getattr(msg, "reply_to", None)
+        parent_id = getattr(reply, "reply_to_msg_id", None) if reply else None
+        if parent_id:
+            item["reply_to_id"] = parent_id
+            quote = getattr(reply, "quote_text", None)
+            if quote:
+                item["quote"] = quote
         return item
 
     async def _iter_history(
@@ -573,6 +582,57 @@ class TelegramTestClient:
             if min_date and msg.date and msg.date < min_date:
                 return
             yield msg
+
+    async def get_thread(
+        self,
+        peer: str,
+        message_id: int,
+        limit: int = 50,
+        scan: int = 300,
+    ) -> Dict[str, Any]:
+        """One message with its parent and every reply to it.
+
+        Telegram only keeps real threads for forum topics and channel comments; asking
+        for one anywhere else fails, so an ordinary group falls back to scanning recent
+        history for messages pointing at this id.
+        """
+        if not self.client:
+            raise Exception("Not connected")
+
+        entity = await self._resolve_identifier(peer)
+        root = await self.client.get_messages(entity, ids=message_id)
+        if root is None:
+            return {"peer": peer, "message_id": message_id, "error": "message not found"}
+
+        parent = None
+        parent_id = getattr(getattr(root, "reply_to", None), "reply_to_msg_id", None)
+        if parent_id:
+            found = await self.client.get_messages(entity, ids=parent_id)
+            parent = self._history_item(found) if found else None
+
+        source = "thread"
+        try:
+            replies = await self.client.get_messages(entity, limit=min(limit, 100), reply_to=message_id)
+        except Exception:
+            # No thread here (plain group): find the replies ourselves.
+            source = "history scan"
+            recent = await self.client.get_messages(entity, limit=min(scan, 1000))
+            replies = [
+                msg
+                for msg in recent
+                if getattr(getattr(msg, "reply_to", None), "reply_to_msg_id", None) == message_id
+            ][:limit]
+
+        items = [self._history_item(msg) for msg in replies]
+        items.sort(key=lambda item: item["id"])
+        return {
+            "peer": peer,
+            "replies_found_via": source,
+            "parent": parent,
+            "message": self._history_item(root),
+            "replies": items,
+            "reply_count": len(items),
+        }
 
     async def list_topics(self, peer: str, limit: int = 100) -> Dict[str, Any]:
         """List forum topics of a supergroup, so a single topic can be read on its own."""
